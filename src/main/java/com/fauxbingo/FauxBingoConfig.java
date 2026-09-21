@@ -80,7 +80,7 @@ public interface FauxBingoConfig extends Config
 	@ConfigItem(
 			keyName = "showTeamIconsInChat",
 			name = "Show Team Icons in Chat",
-			description = "Displays a team icon before player names in chat for active bingo event participants. Requires Bingo API to be enabled.",
+			description = "Displays a team icon before player names in chat for active bingo event participants, and renders team shortcodes such as :fork: as that team's icon. Requires Bingo API to be enabled.",
 			position = 4,
 			section = apiSection
 	)

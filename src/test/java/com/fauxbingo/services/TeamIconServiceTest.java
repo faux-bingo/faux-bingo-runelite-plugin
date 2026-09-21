@@ -13,9 +13,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.IndexedSprite;
+import net.runelite.api.MessageNode;
+import net.runelite.api.NPC;
+import net.runelite.api.Player;
 import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.OverheadTextChanged;
 import net.runelite.client.callback.ClientThread;
 import okhttp3.Call;
 import okhttp3.HttpUrl;
@@ -33,6 +38,7 @@ import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -465,5 +471,259 @@ public class TeamIconServiceTest
 		// true takes it off the client thread queue rather than retrying for the rest of the session.
 		assertTrue(captor.getValue().getAsBoolean());
 		verify(executor, never()).scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
+	}
+
+	/** A single-team roster carrying the given chatCode, serialized the way the API sends it. */
+	private static String rosterWithChatCode(String chatCodeJson)
+	{
+		return "{\"teams\":[{\"id\":\"team-1\",\"name\":\"Flax Field Forkers\""
+			+ ",\"chatCode\":" + chatCodeJson
+			+ ",\"players\":[{\"memberName\":\"Bob (Discord)\","
+			+ "\"accounts\":[{\"displayName\":\"Zezima\"}]}]}]}";
+	}
+
+	@SuppressWarnings("unchecked")
+	private Map<String, String> chatCodeToTeamId() throws Exception
+	{
+		Field field = TeamIconService.class.getDeclaredField("chatCodeToTeamId");
+		field.setAccessible(true);
+		return (Map<String, String>) field.get(service);
+	}
+
+	private MessageNode sendPublicChat(String sender, String body)
+	{
+		MessageNode node = mock(MessageNode.class);
+		when(node.getValue()).thenReturn(body);
+
+		ChatMessage event = new ChatMessage();
+		event.setType(ChatMessageType.PUBLICCHAT);
+		event.setName(sender);
+		event.setMessageNode(node);
+
+		service.onChatMessage(event);
+		return node;
+	}
+
+	private String rewrite(String body)
+	{
+		ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+		MessageNode node = sendPublicChat("SomeRandomGuy", body);
+		verify(node).setValue(captor.capture());
+		return captor.getValue();
+	}
+
+	@Test
+	public void chatCodeMapIsBuiltFromTheRoster() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+
+		service.start();
+
+		assertEquals("team-1", chatCodeToTeamId().get("fork"));
+	}
+
+	@Test
+	public void shortcodeInMessageBodyIsReplacedWithTheTeamIcon() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		assertEquals("gz <img=7> on the drop!", rewrite("gz :fork: on the drop!"));
+	}
+
+	@Test
+	public void shortcodeMatchingIsCaseInsensitive() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		assertEquals("<img=7>", rewrite(":FoRk:"));
+	}
+
+	/** The API returns the code bare, so only the colon-wrapped form may trigger the icon. */
+	@Test
+	public void bareCodeWithoutColonsIsNotReplaced() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		MessageNode node = sendPublicChat("SomeRandomGuy", "just got a dragon fork lol");
+
+		verify(node, never()).setValue(any());
+	}
+
+	@Test
+	public void unknownShortcodeIsLeftAlone() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		MessageNode node = sendPublicChat("SomeRandomGuy", "nice :spoon: mate");
+
+		verify(node, never()).setValue(any());
+	}
+
+	/**
+	 * A team whose icon is still downloading has no sprite index yet, and an img tag built
+	 * without one would point at whatever sprite another plugin registered in that slot.
+	 */
+	@Test
+	public void shortcodeIsLeftAloneUntilItsIconIsRegistered()
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		iconResponseCode = 404;
+
+		service.start();
+
+		MessageNode node = sendPublicChat("SomeRandomGuy", "go :fork: go");
+
+		verify(node, never()).setValue(any());
+	}
+
+	/** Codes are deliberately not checked against the sender's own team. */
+	@Test
+	public void anyPlayerMayUseAnyTeamsShortcode() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		assertEquals("ez <img=7>", rewrite("ez :fork:"));
+	}
+
+	/** Both edits land on the same node, so the chatbox only needs rebuilding once. */
+	@Test
+	public void nameBadgeAndBodyShortcodeRefreshChatOnlyOnce() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		MessageNode node = sendPublicChat("Zezima", "we are :fork:");
+
+		verify(node).setName("<img=7>Zezima");
+		verify(node).setValue("we are <img=7>");
+		verify(client, times(1)).refreshChat();
+	}
+
+	/** A code of "30" would turn the :30: inside a timestamp into an icon. */
+	@Test
+	public void digitOnlyChatCodeIsRejectedSoTimestampsAreSafe() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"30\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		assertTrue(chatCodeToTeamId().isEmpty());
+
+		MessageNode node = sendPublicChat("SomeRandomGuy", "logging at 10:30:45 tonight");
+
+		verify(node, never()).setValue(any());
+	}
+
+	@Test
+	public void nullAndEmptyChatCodesAreIgnored() throws Exception
+	{
+		rosterJson = rosterWithChatCode("null");
+		service.start();
+		assertTrue(chatCodeToTeamId().isEmpty());
+
+		rosterJson = rosterWithChatCode("\"\"");
+		refreshTask().run();
+		assertTrue(chatCodeToTeamId().isEmpty());
+	}
+
+	/** Jagex-worded lines are never rewritten, whatever colons they happen to contain. */
+	@Test
+	public void gameMessagesAreNotRewritten() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		MessageNode node = mock(MessageNode.class);
+		when(node.getValue()).thenReturn("Valuable drop: :fork:");
+
+		ChatMessage event = new ChatMessage();
+		event.setType(ChatMessageType.GAMEMESSAGE);
+		event.setName("");
+		event.setMessageNode(node);
+
+		service.onChatMessage(event);
+
+		verify(node, never()).setValue(any());
+	}
+
+	/** The colon that ends a non-matching pair is also the colon that can open the next one. */
+	@Test
+	public void shortcodeIsFoundAfterANonMatchingColonPair() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		assertEquals(":nope<img=7>", rewrite(":nope:fork:"));
+	}
+
+	@Test
+	public void replacementsPerMessageAreCapped() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		StringBuilder spam = new StringBuilder();
+		for (int i = 0; i < 20; i++)
+		{
+			spam.append(":fork: ");
+		}
+
+		String result = rewrite(spam.toString());
+
+		assertEquals(8, result.split("<img=7>", -1).length - 1);
+		assertTrue("the uncapped remainder must survive as literal text", result.contains(":fork:"));
+	}
+
+	@Test
+	public void overheadTextFromAPlayerIsRewritten() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		Player player = mock(Player.class);
+		service.onOverheadTextChanged(new OverheadTextChanged(player, "go :fork:"));
+
+		verify(player).setOverheadText("go <img=7>");
+	}
+
+	/** Only players - an NPC's overhead line is server-authored text. */
+	@Test
+	public void overheadTextFromAnNpcIsLeftAlone() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		seedSpriteIndex("team-1", 7);
+
+		NPC npc = mock(NPC.class);
+		service.onOverheadTextChanged(new OverheadTextChanged(npc, "go :fork:"));
+
+		verify(npc, never()).setOverheadText(any());
+	}
+
+	@Test
+	public void shortcodesAreDroppedOnShutdown() throws Exception
+	{
+		rosterJson = rosterWithChatCode("\"fork\"");
+		service.start();
+		assertFalse(chatCodeToTeamId().isEmpty());
+
+		service.shutdown();
+
+		assertTrue(chatCodeToTeamId().isEmpty());
 	}
 }
