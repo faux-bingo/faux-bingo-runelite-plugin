@@ -10,16 +10,23 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
+import net.runelite.api.Item;
+import net.runelite.api.ItemContainer;
 import net.runelite.api.NPCComposition;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.NpcLootReceived;
 import net.runelite.client.events.PlayerLootReceived;
@@ -77,11 +84,35 @@ public class LootEventHandler
 		}
 	}
 
+	/** One deferred LOOT_TRACKER_EVENT, held until the tick's remaining container changes land. */
+	private static class PendingEventLoot
+	{
+		private final String source;
+		private final Collection<ItemStack> items;
+
+		PendingEventLoot(String source, Collection<ItemStack> items)
+		{
+			this.source = source;
+			this.items = items;
+		}
+	}
+
 	private final ItemManager itemManager;
 	private final ScreenshotService screenshotService;
 	private final ScheduledExecutorService executor;
 	private final DropCorrelationService dropCorrelationService;
 	private final Client client;
+
+	/** Item id to count for the equipment container, as of the last change to it. */
+	private final Map<Integer, Integer> wornItems = new HashMap<>();
+
+	/** False until wornItems has been populated at least once, so the first diff isn't against nothing. */
+	private boolean wornKnown = false;
+
+	/** Item id to count for everything that left the equipment container this tick. */
+	private final Map<Integer, Integer> unequippedThisTick = new HashMap<>();
+
+	private final List<PendingEventLoot> pendingEventLoot = new ArrayList<>();
 
 	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived event)
@@ -170,6 +201,11 @@ public class LootEventHandler
 	 * Non-combat loot (Tempoross reward pool, Wintertodt crates, clue caskets, chests, Guardians of
 	 * the Rift, and friends) never produces an NpcLootReceived. It only surfaces as a LootReceived
 	 * from the Loot Tracker plugin, so this is the only way we see any of it.
+	 *
+	 * Queued rather than reported here: LootTrackerPlugin derives these items by diffing the
+	 * inventory, so anything else that entered the inventory on this tick is in the list too. The
+	 * gear a player swaps off between kills is the common case - a Tarnished bracelet cleaned on
+	 * the same tick as a weapon switch reported the weapon as loot. onGameTick subtracts it.
 	 */
 	@Subscribe
 	public void onLootReceived(LootReceived event)
@@ -186,7 +222,123 @@ public class LootEventHandler
 			return;
 		}
 
-		processLoot(event.getName(), items, SourceKind.OTHER, DetectionMethod.LOOT_TRACKER_EVENT, null, null);
+		pendingEventLoot.add(new PendingEventLoot(event.getName(), items));
+	}
+
+	@Subscribe
+	public void onItemContainerChanged(ItemContainerChanged event)
+	{
+		if (event.getContainerId() != InventoryID.WORN)
+		{
+			return;
+		}
+
+		Map<Integer, Integer> current = countItems(event.getItemContainer());
+
+		if (wornKnown)
+		{
+			for (Map.Entry<Integer, Integer> entry : wornItems.entrySet())
+			{
+				int removed = entry.getValue() - current.getOrDefault(entry.getKey(), 0);
+				if (removed > 0)
+				{
+					unequippedThisTick.merge(entry.getKey(), removed, Integer::sum);
+				}
+			}
+		}
+
+		wornItems.clear();
+		wornItems.putAll(current);
+		wornKnown = true;
+	}
+
+	/**
+	 * GameTick fires after all of the tick's packets have been processed, so by here both the
+	 * inventory change that produced the loot and the equipment change that ran alongside it have
+	 * been seen, whatever order the server sent them in.
+	 */
+	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		// Seeds wornItems when the plugin starts mid-session, so the player's first gear swap after
+		// startup is diffed against real equipment rather than an empty map.
+		if (!wornKnown)
+		{
+			ItemContainer worn = client.getItemContainer(InventoryID.WORN);
+			if (worn != null)
+			{
+				wornItems.putAll(countItems(worn));
+				wornKnown = true;
+			}
+		}
+
+		for (PendingEventLoot pending : pendingEventLoot)
+		{
+			Collection<ItemStack> items = withoutUnequipped(pending.source, pending.items);
+			if (!items.isEmpty())
+			{
+				processLoot(pending.source, items, SourceKind.OTHER, DetectionMethod.LOOT_TRACKER_EVENT, null, null);
+			}
+		}
+
+		pendingEventLoot.clear();
+		unequippedThisTick.clear();
+	}
+
+	/**
+	 * Drops as much of each stack as the equipment container lost this tick. Subtracting the count
+	 * rather than the whole stack keeps a genuine drop of an item the player also unequipped: come
+	 * back from a crate with two Tomes of fire having taken one off, and one is still loot.
+	 */
+	private Collection<ItemStack> withoutUnequipped(String source, Collection<ItemStack> items)
+	{
+		if (unequippedThisTick.isEmpty())
+		{
+			return items;
+		}
+
+		Map<Integer, Integer> budget = new HashMap<>(unequippedThisTick);
+		List<ItemStack> kept = new ArrayList<>(items.size());
+
+		for (ItemStack item : items)
+		{
+			int available = budget.getOrDefault(item.getId(), 0);
+			int subtract = Math.min(item.getQuantity(), available);
+
+			if (subtract > 0)
+			{
+				budget.put(item.getId(), available - subtract);
+				log.debug("Dropping {} x {} from {} loot, unequipped this tick", subtract, item.getId(), source);
+			}
+
+			int remaining = item.getQuantity() - subtract;
+			if (remaining > 0)
+			{
+				kept.add(new ItemStack(item.getId(), remaining));
+			}
+		}
+
+		return kept;
+	}
+
+	/** Empty slots come through as id -1 or quantity 0 and are left out. */
+	private static Map<Integer, Integer> countItems(ItemContainer container)
+	{
+		Map<Integer, Integer> counts = new HashMap<>();
+		if (container == null)
+		{
+			return counts;
+		}
+
+		for (Item item : container.getItems())
+		{
+			if (item.getId() > 0 && item.getQuantity() > 0)
+			{
+				counts.merge(item.getId(), item.getQuantity(), Integer::sum);
+			}
+		}
+
+		return counts;
 	}
 
 	private void processLoot(String source, Collection<ItemStack> items, SourceKind sourceKind,
