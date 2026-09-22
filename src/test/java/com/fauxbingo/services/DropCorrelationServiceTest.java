@@ -4,6 +4,7 @@ import com.fauxbingo.services.data.DetectionMethod;
 import com.fauxbingo.services.data.DropItem;
 import com.fauxbingo.services.data.DropSignal;
 import com.fauxbingo.services.data.MergedDropEvent;
+import com.fauxbingo.services.data.SourceKind;
 import java.awt.image.BufferedImage;
 import java.util.Arrays;
 import java.util.Collections;
@@ -17,6 +18,7 @@ import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -77,6 +79,24 @@ public class DropCorrelationServiceTest
 	private static DropItem chestItem(int id, String name, int quantity)
 	{
 		return DropItem.builder().id(id).name(name).quantity(quantity).unitPriceGe(1000L).build();
+	}
+
+	/** Mirrors LootEventHandler: one EXACT signal per kill, carrying the NPC it came from. */
+	private static DropSignal npcKill(String name, int npcId, DropItem... items)
+	{
+		return DropSignal.builder()
+			.detectionMethod(DetectionMethod.NPC_LOOT_RECEIVED)
+			.sourceKind(SourceKind.NPC)
+			.sourceName(name)
+			.npcId(npcId)
+			.items(Arrays.asList(items))
+			.totalValueGe(1_000L)
+			.build();
+	}
+
+	private static DropItem killItem(int id, String name, int quantity)
+	{
+		return DropItem.builder().id(id).name(name).quantity(quantity).unitPriceGe(1L).build();
 	}
 
 	private MergedDropEvent captureMergedEvent()
@@ -265,6 +285,59 @@ public class DropCorrelationServiceTest
 		assertEquals(DetectionMethod.RAID_CHEST_CONTAINER, chestEvent.getPrimarySignal().getDetectionMethod());
 		assertEquals(1, leftover.getContributingSignals().size());
 		assertEquals(30, leftover.getPrimarySignal().getItems().get(0).getQuantity());
+	}
+
+	/**
+	 * A cannon kills the same NPC repeatedly inside the window and every kill shares its common
+	 * drop. Folding them into one group reported the first kill and discarded the rest.
+	 */
+	@Test
+	public void rapidKillsOfTheSameNpcStaySeparateEvents()
+	{
+		service.report(npcKill("Ogre", 117, killItem(532, "Big bones", 1)));
+		service.report(npcKill("Ogre", 117, killItem(532, "Big bones", 1)));
+		service.report(npcKill("Ogre", 117, killItem(532, "Big bones", 1), killItem(11840, "Dragon boots", 1)));
+
+		service.shutdown();
+
+		ArgumentCaptor<MergedDropEvent> captor = ArgumentCaptor.forClass(MergedDropEvent.class);
+		verify(envelopeSink, times(3)).accept(captor.capture());
+
+		assertTrue("the rare from the third kill must survive", captor.getAllValues().stream()
+			.anyMatch(e -> e.getPrimarySignal().getItems().stream()
+				.anyMatch(i -> "Dragon boots".equals(i.getName()))));
+	}
+
+	/** Different NPCs sharing a common drop are still different kills. */
+	@Test
+	public void differentNpcsSharingACommonDropStaySeparate()
+	{
+		service.report(npcKill("Hill Giant", 2098, killItem(532, "Big bones", 1)));
+		service.report(npcKill("Moss Giant", 2090, killItem(532, "Big bones", 1), killItem(1149, "Dragon med helm", 1)));
+
+		service.shutdown();
+
+		verify(envelopeSink, times(2)).accept(any());
+	}
+
+	/** A chat line the first kill already claimed must not pull a later kill into its group. */
+	@Test
+	public void exactSignalDoesNotClaimAGroupAnotherSourceAnchored()
+	{
+		service.report(chatDrop("Dragon boots", 1, 150_000));
+		service.report(npcKill("Hill Giant", 2098, killItem(11840, "Dragon boots", 1)));
+		service.report(npcKill("Moss Giant", 2090, killItem(11840, "Dragon boots", 1)));
+
+		service.shutdown();
+
+		ArgumentCaptor<MergedDropEvent> captor = ArgumentCaptor.forClass(MergedDropEvent.class);
+		verify(envelopeSink, times(2)).accept(captor.capture());
+
+		MergedDropEvent anchored = captor.getAllValues().stream()
+			.filter(e -> e.getContributingSignals().size() == 2)
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("chat line should have been claimed by one kill"));
+		assertEquals("Hill Giant", anchored.getPrimarySignal().getSourceName());
 	}
 
 	/** Both DERIVED lines describe the one item, so they must not compete for its single unit. */

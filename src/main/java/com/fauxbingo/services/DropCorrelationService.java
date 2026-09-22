@@ -118,7 +118,7 @@ public class DropCorrelationService
 		if (!quantities.isEmpty())
 		{
 			PendingGroup byItem = signal.getDetectionMethod().getConfidence() == Confidence.EXACT
-				? absorbMatchingGroups(quantities)
+				? absorbMatchingGroups(signal, quantities)
 				: findGroupWithRoom(signal.getDetectionMethod(), quantities);
 			if (byItem != null)
 			{
@@ -174,14 +174,25 @@ public class DropCorrelationService
 	 * Claims every group this signal's items cover, not just the first: a chest arrives after
 	 * several chat lines that each became their own group. Stops folding groups in once they
 	 * exhaust the count for an item, so an unrelated drop of it isn't swallowed too.
+	 *
+	 * Only a group still holding a DERIVED signal is eligible. Two EXACT signals are two separate
+	 * drops and folding them together loses one: resolve() keeps a single primary, and
+	 * EventsApiService builds the payload from that primary's items alone. Repeated kills of one
+	 * NPC inside the window all share its common drop, which is why a cannon collapsed a whole
+	 * window into its first kill.
 	 */
-	private PendingGroup absorbMatchingGroups(Map<String, Integer> quantities)
+	private PendingGroup absorbMatchingGroups(DropSignal signal, Map<String, Integer> quantities)
 	{
 		Map<String, Integer> remaining = new HashMap<>(quantities);
 		List<PendingGroup> absorbed = new ArrayList<>();
 
 		for (PendingGroup group : pendingGroups)
 		{
+			if (!group.hasDerived() || !group.acceptsExactFrom(signal))
+			{
+				continue;
+			}
+
 			Set<String> shared = new HashSet<>(group.itemKeys());
 			shared.retainAll(remaining.keySet());
 			if (shared.isEmpty())
@@ -258,6 +269,23 @@ public class DropCorrelationService
 			}
 		}
 		return quantities;
+	}
+
+	/**
+	 * npcId when both signals carry one, source name otherwise. Either being absent counts as a
+	 * match rather than blocking one: ServerNpcLoot can arrive with a null composition name, and
+	 * chest and loot-tracker-event signals never carry an npcId.
+	 */
+	private static boolean sameSource(DropSignal a, DropSignal b)
+	{
+		if (a.getNpcId() != null && b.getNpcId() != null)
+		{
+			return a.getNpcId().equals(b.getNpcId());
+		}
+
+		String first = a.getSourceName();
+		String second = b.getSourceName();
+		return first == null || second == null || first.equalsIgnoreCase(second);
 	}
 
 	/** Strips a chat-embedded quantity prefix like "30 x " so names line up across handlers. */
@@ -428,6 +456,29 @@ public class DropCorrelationService
 		boolean hasCollectionLog()
 		{
 			return signals.stream().anyMatch(s -> s.getDetectionMethod().getType() == DropType.COLLECTION_LOG);
+		}
+
+		boolean hasDerived()
+		{
+			return signals.stream().anyMatch(s -> s.getDetectionMethod().getConfidence() != Confidence.EXACT);
+		}
+
+		/**
+		 * A group anchored by one source's EXACT signal is closed to every other source. Without
+		 * this, a chat line sitting between two kills gives them a shared item key, and the second
+		 * kill absorbs the first kill's group through it.
+		 */
+		boolean acceptsExactFrom(DropSignal signal)
+		{
+			for (DropSignal existing : signals)
+			{
+				if (existing.getDetectionMethod().getConfidence() == Confidence.EXACT
+					&& !sameSource(existing, signal))
+				{
+					return false;
+				}
+			}
+			return true;
 		}
 
 		Set<String> itemKeys()
