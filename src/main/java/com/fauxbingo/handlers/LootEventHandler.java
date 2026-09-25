@@ -11,9 +11,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -72,13 +72,15 @@ public class LootEventHandler
 
 	private static class SeenKill
 	{
-		private final String key;
+		private final String source;
+		private final Map<Integer, Integer> totals;
 		private final NpcLootSignal signal;
 		private final long timestamp;
 
-		SeenKill(String key, NpcLootSignal signal, long timestamp)
+		SeenKill(String source, Map<Integer, Integer> totals, NpcLootSignal signal, long timestamp)
 		{
-			this.key = key;
+			this.source = source;
+			this.totals = totals;
 			this.signal = signal;
 			this.timestamp = timestamp;
 		}
@@ -146,7 +148,7 @@ public class LootEventHandler
 	/**
 	 * Most kills fire both NPC loot events, so the first one through wins and the second is paired
 	 * off against it. Pairing consumes a single entry rather than suppressing everything with a
-	 * matching key, so back to back kills of the same NPC with identical loot still report once each.
+	 * matching kill, so back to back kills of the same NPC with identical loot still report once each.
 	 */
 	private void processNpcLoot(String source, Collection<ItemStack> items, NpcLootSignal signal, Integer npcId, Integer combatLevel)
 	{
@@ -155,26 +157,63 @@ public class LootEventHandler
 			return;
 		}
 
-		String key = buildKillKey(source, items);
+		Map<Integer, Integer> totals = itemTotals(items);
 		long now = System.currentTimeMillis();
 		dropStaleKills(now);
 
-		for (Iterator<SeenKill> it = unpairedKills.iterator(); it.hasNext(); )
+		SeenKill pair = findPair(source, totals, signal);
+		if (pair != null)
 		{
-			SeenKill seen = it.next();
-			if (seen.signal == signal.other() && seen.key.equals(key))
-			{
-				it.remove();
-				log.debug("Skipping {} loot for {}, already reported via {}", signal, source, seen.signal);
-				return;
-			}
+			unpairedKills.remove(pair);
+			log.debug("Skipping {} loot for {}, already reported via {}", signal, source, pair.signal);
+			return;
 		}
 
-		unpairedKills.add(new SeenKill(key, signal, now));
+		unpairedKills.add(new SeenKill(source, totals, signal, now));
 		DetectionMethod method = signal == NpcLootSignal.TILE_SCAN
 			? DetectionMethod.NPC_LOOT_RECEIVED
 			: DetectionMethod.SERVER_NPC_LOOT;
 		processLoot(source, items, SourceKind.NPC, method, npcId, combatLevel);
+	}
+
+	/**
+	 * An identical loot list is the normal pair. Failing that, one list holding nothing the other
+	 * lacks still pairs: the tile scan only sees what reached the ground, so a bonecrusher eating a
+	 * Mithril dragon's Dragon bones leaves it one item short of the server's list for the same kill.
+	 * Identical is tried first so a subset can't steal the pair of an exact match queued behind it.
+	 */
+	private SeenKill findPair(String source, Map<Integer, Integer> totals, NpcLootSignal signal)
+	{
+		SeenKill subsetMatch = null;
+		for (SeenKill seen : unpairedKills)
+		{
+			if (seen.signal != signal.other() || !Objects.equals(seen.source, source))
+			{
+				continue;
+			}
+			if (seen.totals.equals(totals))
+			{
+				return seen;
+			}
+			if (subsetMatch == null && (containedIn(seen.totals, totals) || containedIn(totals, seen.totals)))
+			{
+				subsetMatch = seen;
+			}
+		}
+		return subsetMatch;
+	}
+
+	/** True when every item in part appears in whole with at least the same count. */
+	private static boolean containedIn(Map<Integer, Integer> part, Map<Integer, Integer> whole)
+	{
+		for (Map.Entry<Integer, Integer> entry : part.entrySet())
+		{
+			if (whole.getOrDefault(entry.getKey(), 0) < entry.getValue())
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private void dropStaleKills(long now)
@@ -186,25 +225,18 @@ public class LootEventHandler
 	}
 
 	/**
-	 * Source plus its loot, order and stacking independent so both events produce the same key.
+	 * Item id to count, order and stacking independent so both events describe a kill the same way.
 	 * Quantities are summed per item because the two events don't stack non-stackables the same
 	 * way: a Mithril dragon's three bars arrive as three 1x stacks in one and a single 3x in the other.
 	 */
-	private static String buildKillKey(String source, Collection<ItemStack> items)
+	private static Map<Integer, Integer> itemTotals(Collection<ItemStack> items)
 	{
 		Map<Integer, Integer> totals = new HashMap<>();
 		for (ItemStack item : items)
 		{
 			totals.merge(item.getId(), item.getQuantity(), Integer::sum);
 		}
-
-		List<String> stacks = new ArrayList<>(totals.size());
-		for (Map.Entry<Integer, Integer> entry : totals.entrySet())
-		{
-			stacks.add(entry.getKey() + "x" + entry.getValue());
-		}
-		stacks.sort(null);
-		return source + "|" + String.join(",", stacks);
+		return totals;
 	}
 
 	/**

@@ -34,6 +34,7 @@ public class ServerNpcLootHandlerTest
 	private static final int OATHPLATE_SHARDS_ID = 30765;
 	private static final int SHARD_PRICE = 183_000;
 	private static final int BONES_ID = 526;
+	private static final int CHAOS_RUNE_ID = 562;
 
 	@Mock
 	private ItemManager itemManager;
@@ -77,6 +78,10 @@ public class ServerNpcLootHandlerTest
 		when(bones.getName()).thenReturn("Bones");
 		when(itemManager.getItemComposition(BONES_ID)).thenReturn(bones);
 		when(itemManager.getItemPrice(BONES_ID)).thenReturn(100);
+
+		ItemComposition chaos = mock(ItemComposition.class);
+		when(chaos.getName()).thenReturn("Chaos rune");
+		when(itemManager.getItemComposition(CHAOS_RUNE_ID)).thenReturn(chaos);
 	}
 
 	private ServerNpcLoot serverLoot(String name, List<ItemStack> items)
@@ -215,15 +220,52 @@ public class ServerNpcLootHandlerTest
 		verify(dropCorrelationService, times(1)).report(any());
 	}
 
-	/** Summing per item must not hide a real difference in how many dropped. */
+	/**
+	 * Bonecrusher: the Dragon bones never reach the ground, so the tile scan is short an item the
+	 * server event still lists. Same kill, one report, whichever lands first.
+	 */
 	@Test
-	public void differentTotalOfSameItemIsNotPaired()
+	public void tileScanMissingAnAutoCollectedItemStillPairs()
 	{
-		lootEventHandler.onNpcLootReceived(tileLoot("Mithril dragon", Arrays.asList(
+		ItemStack bone = new ItemStack(BONES_ID, 1, null);
+		List<ItemStack> ground = Arrays.asList(
 			new ItemStack(OATHPLATE_SHARDS_ID, 1, null),
-			new ItemStack(OATHPLATE_SHARDS_ID, 1, null))));
-		lootEventHandler.onServerNpcLoot(serverLoot("Mithril dragon",
-			Collections.singletonList(new ItemStack(OATHPLATE_SHARDS_ID, 3, null))));
+			new ItemStack(OATHPLATE_SHARDS_ID, 1, null),
+			new ItemStack(OATHPLATE_SHARDS_ID, 1, null));
+		List<ItemStack> server = Arrays.asList(bone, new ItemStack(OATHPLATE_SHARDS_ID, 3, null));
+
+		lootEventHandler.onServerNpcLoot(serverLoot("Mithril dragon", server));
+		lootEventHandler.onNpcLootReceived(tileLoot("Mithril dragon", ground));
+		lootEventHandler.onNpcLootReceived(tileLoot("Mithril dragon", ground));
+		lootEventHandler.onServerNpcLoot(serverLoot("Mithril dragon", server));
+
+		verify(dropCorrelationService, times(2)).report(any());
+	}
+
+	/** Each side holding something the other lacks is two different kills, not one partial one. */
+	@Test
+	public void lootThatOverlapsWithoutContainmentIsNotPaired()
+	{
+		ItemStack bone = new ItemStack(BONES_ID, 1, null);
+		ItemStack shard = new ItemStack(OATHPLATE_SHARDS_ID, 12, null);
+
+		lootEventHandler.onServerNpcLoot(serverLoot("Vorkath", Arrays.asList(bone, shard)));
+		lootEventHandler.onNpcLootReceived(tileLoot("Vorkath", Arrays.asList(bone, new ItemStack(CHAOS_RUNE_ID, 24, null))));
+
+		verify(dropCorrelationService, times(2)).report(any());
+	}
+
+	/** An exact match queued behind a subset match gets the pair, leaving the subset for its own kill. */
+	@Test
+	public void exactMatchIsPreferredOverAnEarlierSubset()
+	{
+		List<ItemStack> bonesOnly = Collections.singletonList(new ItemStack(BONES_ID, 1, null));
+		List<ItemStack> bonesAndShards = Arrays.asList(new ItemStack(BONES_ID, 1, null), new ItemStack(OATHPLATE_SHARDS_ID, 12, null));
+
+		lootEventHandler.onServerNpcLoot(serverLoot("Vorkath", bonesAndShards));
+		lootEventHandler.onServerNpcLoot(serverLoot("Vorkath", bonesOnly));
+		lootEventHandler.onNpcLootReceived(tileLoot("Vorkath", bonesOnly));
+		lootEventHandler.onNpcLootReceived(tileLoot("Vorkath", bonesAndShards));
 
 		verify(dropCorrelationService, times(2)).report(any());
 	}
