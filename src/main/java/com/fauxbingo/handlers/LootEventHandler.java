@@ -185,13 +185,23 @@ public class LootEventHandler
 		}
 	}
 
-	/** Source plus its loot, order independent so both events produce the same key. */
+	/**
+	 * Source plus its loot, order and stacking independent so both events produce the same key.
+	 * Quantities are summed per item because the two events don't stack non-stackables the same
+	 * way: a Mithril dragon's three bars arrive as three 1x stacks in one and a single 3x in the other.
+	 */
 	private static String buildKillKey(String source, Collection<ItemStack> items)
 	{
-		List<String> stacks = new ArrayList<>(items.size());
+		Map<Integer, Integer> totals = new HashMap<>();
 		for (ItemStack item : items)
 		{
-			stacks.add(item.getId() + "x" + item.getQuantity());
+			totals.merge(item.getId(), item.getQuantity(), Integer::sum);
+		}
+
+		List<String> stacks = new ArrayList<>(totals.size());
+		for (Map.Entry<Integer, Integer> entry : totals.entrySet())
+		{
+			stacks.add(entry.getKey() + "x" + entry.getValue());
 		}
 		stacks.sort(null);
 		return source + "|" + String.join(",", stacks);

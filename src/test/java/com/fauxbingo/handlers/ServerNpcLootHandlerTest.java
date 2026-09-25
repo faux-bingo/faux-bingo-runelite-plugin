@@ -194,6 +194,40 @@ public class ServerNpcLootHandlerTest
 		verify(dropCorrelationService, times(1)).report(any());
 	}
 
+	/**
+	 * Mithril dragon: the three unnoted bars come through as separate 1x stacks from one event and
+	 * a single 3x stack from the other. Still one kill, so still one report.
+	 */
+	@Test
+	public void differentStackingOfNonStackablesStillPairs()
+	{
+		ItemStack bone = new ItemStack(BONES_ID, 1, null);
+
+		lootEventHandler.onNpcLootReceived(tileLoot("Mithril dragon", Arrays.asList(
+			bone,
+			new ItemStack(OATHPLATE_SHARDS_ID, 1, null),
+			new ItemStack(OATHPLATE_SHARDS_ID, 1, null),
+			new ItemStack(OATHPLATE_SHARDS_ID, 1, null))));
+		lootEventHandler.onServerNpcLoot(serverLoot("Mithril dragon", Arrays.asList(
+			bone,
+			new ItemStack(OATHPLATE_SHARDS_ID, 3, null))));
+
+		verify(dropCorrelationService, times(1)).report(any());
+	}
+
+	/** Summing per item must not hide a real difference in how many dropped. */
+	@Test
+	public void differentTotalOfSameItemIsNotPaired()
+	{
+		lootEventHandler.onNpcLootReceived(tileLoot("Mithril dragon", Arrays.asList(
+			new ItemStack(OATHPLATE_SHARDS_ID, 1, null),
+			new ItemStack(OATHPLATE_SHARDS_ID, 1, null))));
+		lootEventHandler.onServerNpcLoot(serverLoot("Mithril dragon",
+			Collections.singletonList(new ItemStack(OATHPLATE_SHARDS_ID, 3, null))));
+
+		verify(dropCorrelationService, times(2)).report(any());
+	}
+
 	@Test
 	public void nullCompositionAndEmptyItemsAreSafe()
 	{
