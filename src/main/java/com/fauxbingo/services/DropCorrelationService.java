@@ -135,8 +135,11 @@ public class DropCorrelationService
 	}
 
 	/**
-	 * A DERIVED signal needs an EXACT count to fit inside, so with no such group it stands alone:
-	 * two chat lines for one item are two drops until something authoritative says otherwise.
+	 * A DERIVED signal needs a count to fit inside: the EXACT one when the group has it, otherwise
+	 * what the group's other chat methods already claimed. So a collection-log line joins the
+	 * valuable-drop line for the same unique ahead of the kill's loot event, instead of being left
+	 * behind in its own group when that loot event absorbs the valuable drop. Two lines from one
+	 * method are still two drops until something authoritative says otherwise.
 	 */
 	private PendingGroup findGroupWithRoom(DetectionMethod method, Map<String, Integer> quantities)
 	{
@@ -155,6 +158,10 @@ public class DropCorrelationService
 				shared = true;
 
 				int capacity = group.capacityFor(entry.getKey());
+				if (capacity <= 0)
+				{
+					capacity = group.derivedDemand(entry.getKey());
+				}
 				if (capacity <= 0 || group.claimedFor(entry.getKey(), method) + entry.getValue() > capacity)
 				{
 					fits = false;

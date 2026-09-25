@@ -356,4 +356,55 @@ public class DropCorrelationServiceTest
 		MergedDropEvent merged = captureMergedEvent();
 		assertEquals(3, merged.getContributingSignals().size());
 	}
+	private static DropSignal collectionLog(DetectionMethod method, String itemName)
+	{
+		return DropSignal.builder()
+			.detectionMethod(method)
+			.items(Collections.singletonList(DropItem.builder().name(itemName).quantity(1).build()))
+			.build();
+	}
+
+	/**
+	 * Frost Nagua: the valuable-drop and collection-log lines both land before the kill's loot
+	 * event. The kill absorbed the first line's group, and the collection log went out on its own.
+	 */
+	@Test
+	public void chatLinesBeforeTheKillAllFoldIntoIt()
+	{
+		service.report(chatDrop("Glacial temotli", 1, 82_000));
+		service.report(collectionLog(DetectionMethod.CHAT_COLLECTION_LOG, "Glacial temotli"));
+		service.report(npcKill("Frost Nagua", 13713,
+			killItem(29193, "Glacial temotli", 1), killItem(562, "Chaos rune", 24)));
+
+		service.shutdown();
+
+		MergedDropEvent merged = captureMergedEvent();
+		assertEquals(3, merged.getContributingSignals().size());
+		assertEquals(DetectionMethod.NPC_LOOT_RECEIVED, merged.getPrimarySignal().getDetectionMethod());
+	}
+
+	/** Collection log chat and popup both enabled: two lines for one item, ahead of the kill. */
+	@Test
+	public void collectionLogChatAndPopupBeforeTheKillFoldIntoIt()
+	{
+		service.report(collectionLog(DetectionMethod.CHAT_COLLECTION_LOG, "Glacial temotli"));
+		service.report(collectionLog(DetectionMethod.NOTIFICATION_COLLECTION_LOG, "Glacial temotli"));
+		service.report(npcKill("Frost Nagua", 13713, killItem(29193, "Glacial temotli", 1)));
+
+		service.shutdown();
+
+		assertEquals(3, captureMergedEvent().getContributingSignals().size());
+	}
+
+	/** Two lines from the same method are still two rolls, with or without a kill to anchor them. */
+	@Test
+	public void twoValuableDropLinesBeforeAnyKillStaySeparate()
+	{
+		service.report(chatDrop("Dragon boots", 1, 150_000));
+		service.report(chatDrop("Dragon boots", 1, 150_000));
+
+		service.shutdown();
+
+		verify(envelopeSink, times(2)).accept(any());
+	}
 }
