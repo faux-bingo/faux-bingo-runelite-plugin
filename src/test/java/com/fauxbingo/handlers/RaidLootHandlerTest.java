@@ -19,6 +19,8 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.game.ItemManager;
 import org.junit.Before;
 import org.junit.Test;
@@ -367,5 +369,47 @@ public class RaidLootHandlerTest
 		raidLootHandler.onItemContainerChanged(containerEvent);
 
 		verify(dropCorrelationService, times(2)).report(any());
+	}
+
+	private void tickWithInRaidVarbit(int value)
+	{
+		when(client.getVarbitValue(VarbitID.RAIDS_CLIENT_INDUNGEON)).thenReturn(value);
+		raidLootHandler.onGameTick(new GameTick());
+	}
+
+	/** Chat lands when Olm dies, the chest can be opened much later: hold until they leave. */
+	@Test
+	public void testCorrelationHeldForAsLongAsThePlayerIsInChambers()
+	{
+		tickWithInRaidVarbit(1);
+		tickWithInRaidVarbit(1);
+		verify(dropCorrelationService).holdNewGroups();
+		verify(dropCorrelationService, never()).releaseHeldGroups();
+
+		tickWithInRaidVarbit(0);
+		verify(dropCorrelationService).releaseHeldGroups();
+	}
+
+	@Test
+	public void testLoggingOutOfChambersReleasesTheHold()
+	{
+		tickWithInRaidVarbit(1);
+
+		GameStateChanged logout = new GameStateChanged();
+		logout.setGameState(GameState.LOGIN_SCREEN);
+		raidLootHandler.onGameStateChanged(logout);
+
+		verify(dropCorrelationService).releaseHeldGroups();
+	}
+
+	/** Ticks outside the raid leave the hold alone. */
+	@Test
+	public void testTicksOutsideChambersDoNotTouchTheHold()
+	{
+		tickWithInRaidVarbit(0);
+		tickWithInRaidVarbit(0);
+
+		verify(dropCorrelationService, never()).holdNewGroups();
+		verify(dropCorrelationService, never()).releaseHeldGroups();
 	}
 }

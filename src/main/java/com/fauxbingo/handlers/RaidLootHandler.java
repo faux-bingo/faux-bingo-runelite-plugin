@@ -24,8 +24,10 @@ import net.runelite.api.ItemContainer;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.util.Text;
@@ -45,6 +47,12 @@ import net.runelite.client.util.Text;
  * identical loot a second time. The bundled LootTrackerPlugin's `chestLooted` latch never has
  * this problem because it only resets on a real boundary - entering or leaving an instanced
  * region - so that's what this mirrors instead of a timer.
+ *
+ * Chambers of Xeric announces its loot in chat when Olm dies, but the chest can be opened any
+ * amount of time later, so DropCorrelationService is told to hold chat-only groups open for as
+ * long as the player is inside the raid. Nothing else that produces loot can happen before they
+ * leave it. The varbit is read every tick rather than trusted to report its own change, so a
+ * plugin started mid-raid, or a missed change, can't leave the hold in the wrong state.
  */
 @Slf4j
 @Singleton
@@ -89,6 +97,7 @@ public class RaidLootHandler
 	private final List<String> rareDrops = new ArrayList<>();
 	private boolean raidProcessed = false;
 	private boolean inInstancedRegion = false;
+	private boolean inChambers = false;
 
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
@@ -105,8 +114,37 @@ public class RaidLootHandler
 	}
 
 	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		setInChambers(client.getVarbitValue(VarbitID.RAIDS_CLIENT_INDUNGEON) == 1);
+	}
+
+	private void setInChambers(boolean nowInChambers)
+	{
+		if (nowInChambers == inChambers)
+		{
+			return;
+		}
+		inChambers = nowInChambers;
+		if (nowInChambers)
+		{
+			dropCorrelationService.holdNewGroups();
+		}
+		else
+		{
+			dropCorrelationService.releaseHeldGroups();
+		}
+	}
+
+	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
+		// Logging out ends the raid without the varbit necessarily reporting it.
+		if (event.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			setInChambers(false);
+		}
+
 		// Mirrors LootTrackerPlugin's `chestLooted` reset: the latch only re-arms on a genuine
 		// boundary (entering or leaving an instance), never on elapsed time, so a chest the player
 		// is still standing in front of can't be reported twice just because they took a while to

@@ -21,6 +21,7 @@ import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
@@ -37,6 +38,12 @@ import lombok.extern.slf4j.Slf4j;
  * this service can't match (raid chat-to-chest latency can exceed the window below). This
  * service only handles the cross-method case: the same item reported via more than one
  * detection method.
+ *
+ * Chambers of Xeric is the exception to the fixed window: its chat lines land when Olm dies, and
+ * the chest can be opened any amount of time after. While the player is inside the raid,
+ * RaidLootHandler has groups of nothing but chat lines held open until something authoritative
+ * joins them or the player leaves. Anything with an EXACT signal (the raid's own kills, the chest
+ * once it opens) keeps the normal window, since the API stamps an event when it's sent.
  */
 @Slf4j
 @Singleton
@@ -44,6 +51,8 @@ public class DropCorrelationService
 {
 	private static final long CORRELATION_WINDOW_MS = 5_000;
 	private static final long SWEEP_INTERVAL_MS = 500;
+	/** Backstop for a hold whose release never arrives, so loot can't be trapped indefinitely. */
+	private static final long MAX_HOLD_MS = 60 * 60_000;
 	private static final Pattern QUANTITY_PREFIX = Pattern.compile("^[0-9,]+\\s*x\\s+");
 
 	private final EventEnvelopeSink envelopeSink;
@@ -51,6 +60,10 @@ public class DropCorrelationService
 
 	private final Deque<PendingGroup> pendingGroups = new ArrayDeque<>();
 	private ScheduledFuture<?> sweepTask;
+	private boolean holding = false;
+
+	/** Swapped out by tests so windows can elapse without sleeping. */
+	LongSupplier clock = System::currentTimeMillis;
 
 	@Inject
 	public DropCorrelationService(EventEnvelopeSink envelopeSink, ScheduledExecutorService executor)
@@ -86,13 +99,50 @@ public class DropCorrelationService
 			return;
 		}
 
+		boolean exact = signal.getDetectionMethod().getConfidence() == Confidence.EXACT;
+		long now = clock.getAsLong();
+
 		PendingGroup group = findMatchingGroup(signal);
 		if (group == null)
 		{
-			group = new PendingGroup(System.currentTimeMillis() + CORRELATION_WINDOW_MS);
+			boolean hold = holding && !exact;
+			group = new PendingGroup(now + (hold ? MAX_HOLD_MS : CORRELATION_WINDOW_MS));
+			group.held = hold;
 			pendingGroups.add(group);
 		}
+		else if (group.held && exact)
+		{
+			group.held = false;
+			group.deadline = now + CORRELATION_WINDOW_MS;
+		}
 		group.signals.add(signal);
+	}
+
+	/**
+	 * Chat-only groups opened from now on stay pending until an EXACT signal joins them or
+	 * releaseHeldGroups, not just for the window.
+	 */
+	public synchronized void holdNewGroups()
+	{
+		holding = true;
+	}
+
+	/**
+	 * Gives every held group a normal window from now rather than dispatching it on the spot, so
+	 * a signal still waiting on its screenshot can join.
+	 */
+	public synchronized void releaseHeldGroups()
+	{
+		holding = false;
+		long deadline = clock.getAsLong() + CORRELATION_WINDOW_MS;
+		for (PendingGroup group : pendingGroups)
+		{
+			if (group.held)
+			{
+				group.held = false;
+				group.deadline = Math.min(group.deadline, deadline);
+			}
+		}
 	}
 
 	/**
@@ -112,6 +162,15 @@ public class DropCorrelationService
 		if (isPet)
 		{
 			return findGroup(g -> g.hasCollectionLog() && !g.hasPet());
+		}
+
+		if (signal.getDetectionMethod().getConfidence() == Confidence.EXACT)
+		{
+			PendingGroup counterpart = findGroup(g -> g.hasCounterpartOf(signal));
+			if (counterpart != null)
+			{
+				return counterpart;
+			}
 		}
 
 		Map<String, Integer> quantities = itemQuantities(signal);
@@ -295,6 +354,77 @@ public class DropCorrelationService
 		return first == null || second == null || first.equalsIgnoreCase(second);
 	}
 
+	/**
+	 * RaidLootHandler and the Loot Tracker both read the raid chest's container when it opens, so
+	 * they are two views of one chest rather than two drops. The two EXACT signals would otherwise
+	 * only meet if a chat line for the chest was still pending to bridge them.
+	 *
+	 * Source names are compared by prefix because the Loot Tracker never names the mode
+	 * ("Chambers of Xeric" for a Challenge Mode chest too). The tracker's list is allowed to fall
+	 * short of the chest's, since LootEventHandler subtracts anything unequipped on the same tick.
+	 */
+	private static boolean sameChest(DropSignal a, DropSignal b)
+	{
+		DropSignal chest;
+		DropSignal tracker;
+		if (a.getDetectionMethod() == DetectionMethod.RAID_CHEST_CONTAINER
+			&& b.getDetectionMethod() == DetectionMethod.LOOT_TRACKER_EVENT)
+		{
+			chest = a;
+			tracker = b;
+		}
+		else if (b.getDetectionMethod() == DetectionMethod.RAID_CHEST_CONTAINER
+			&& a.getDetectionMethod() == DetectionMethod.LOOT_TRACKER_EVENT)
+		{
+			chest = b;
+			tracker = a;
+		}
+		else
+		{
+			return false;
+		}
+
+		String chestName = chest.getSourceName();
+		String trackerName = tracker.getSourceName();
+		if (chestName == null || trackerName == null
+			|| !chestName.regionMatches(true, 0, trackerName, 0, trackerName.length()))
+		{
+			return false;
+		}
+
+		Map<Integer, Integer> chestItems = itemIdTotals(chest);
+		Map<Integer, Integer> trackerItems = itemIdTotals(tracker);
+		if (trackerItems.isEmpty())
+		{
+			return false;
+		}
+		for (Map.Entry<Integer, Integer> entry : trackerItems.entrySet())
+		{
+			if (chestItems.getOrDefault(entry.getKey(), 0) < entry.getValue())
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static Map<Integer, Integer> itemIdTotals(DropSignal signal)
+	{
+		Map<Integer, Integer> totals = new HashMap<>();
+		if (signal.getItems() == null)
+		{
+			return totals;
+		}
+		for (DropItem item : signal.getItems())
+		{
+			if (item.getId() != null)
+			{
+				totals.merge(item.getId(), Math.max(item.getQuantity(), 0), Integer::sum);
+			}
+		}
+		return totals;
+	}
+
 	/** Strips a chat-embedded quantity prefix like "30 x " so names line up across handlers. */
 	private static String normalizeName(String name)
 	{
@@ -308,7 +438,7 @@ public class DropCorrelationService
 
 	private synchronized void sweep()
 	{
-		long now = System.currentTimeMillis();
+		long now = clock.getAsLong();
 		Iterator<PendingGroup> it = pendingGroups.iterator();
 		while (it.hasNext())
 		{
@@ -446,7 +576,9 @@ public class DropCorrelationService
 
 	private static class PendingGroup
 	{
-		private final long deadline;
+		private long deadline;
+		/** Chat lines only, opened inside Chambers of Xeric; only MAX_HOLD_MS closes it until released. */
+		private boolean held;
 		private final String dropGroupId = UUID.randomUUID().toString();
 		private final List<DropSignal> signals = new ArrayList<>();
 
@@ -463,6 +595,21 @@ public class DropCorrelationService
 		boolean hasCollectionLog()
 		{
 			return signals.stream().anyMatch(s -> s.getDetectionMethod().getType() == DropType.COLLECTION_LOG);
+		}
+
+		/** Already holds the other view of the chest this signal reports, and not this view yet. */
+		boolean hasCounterpartOf(DropSignal signal)
+		{
+			boolean counterpart = false;
+			for (DropSignal existing : signals)
+			{
+				if (existing.getDetectionMethod() == signal.getDetectionMethod())
+				{
+					return false;
+				}
+				counterpart |= sameChest(existing, signal);
+			}
+			return counterpart;
 		}
 
 		boolean hasDerived()

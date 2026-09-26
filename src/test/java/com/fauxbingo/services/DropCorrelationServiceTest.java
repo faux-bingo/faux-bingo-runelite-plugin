@@ -20,6 +20,8 @@ import org.mockito.junit.MockitoJUnitRunner;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -406,5 +408,233 @@ public class DropCorrelationServiceTest
 		service.shutdown();
 
 		verify(envelopeSink, times(2)).accept(any());
+	}
+
+	/** Mirrors LootEventHandler's LootReceived path, which names the raid without its mode. */
+	private static DropSignal lootTrackerEvent(String source, DropItem... items)
+	{
+		return DropSignal.builder()
+			.detectionMethod(DetectionMethod.LOOT_TRACKER_EVENT)
+			.sourceKind(SourceKind.OTHER)
+			.sourceName(source)
+			.items(Arrays.asList(items))
+			.totalValueGe(1_000_000L)
+			.build();
+	}
+
+	private static DropSignal coxChest(String source, DropItem... items)
+	{
+		return DropSignal.builder()
+			.detectionMethod(DetectionMethod.RAID_CHEST_CONTAINER)
+			.sourceName(source)
+			.items(Arrays.asList(items))
+			.totalValueGe(1_000_000L)
+			.build();
+	}
+
+	/** Captures the sweep start() schedules, so a test can run it after moving the clock. */
+	private Runnable startSweep()
+	{
+		service.start();
+		ArgumentCaptor<Runnable> captor = ArgumentCaptor.forClass(Runnable.class);
+		verify(executor).scheduleAtFixedRate(captor.capture(), anyLong(), anyLong(), any());
+		return captor.getValue();
+	}
+
+	/**
+	 * The raid chest and the Loot Tracker read the same container. With no chat line pending to
+	 * bridge them they went out as two events for one Elder maul.
+	 */
+	@Test
+	public void raidChestAndLootTrackerMergeWithoutAChatLine()
+	{
+		service.report(coxChest("Chambers of Xeric",
+			chestItem(21003, "Elder maul", 1), chestItem(560, "Death rune", 900)));
+		service.report(lootTrackerEvent("Chambers of Xeric",
+			chestItem(21003, "Elder maul", 1), chestItem(560, "Death rune", 900)));
+
+		service.shutdown();
+
+		MergedDropEvent merged = captureMergedEvent();
+		assertEquals(2, merged.getContributingSignals().size());
+	}
+
+	/** The Loot Tracker never names the mode, so its source only prefixes the chest's. */
+	@Test
+	public void challengeModeChestMergesWithTheTrackersPlainRaidName()
+	{
+		service.report(lootTrackerEvent("Chambers of Xeric", chestItem(21003, "Elder maul", 1)));
+		service.report(coxChest("Chambers of Xeric Challenge Mode", chestItem(21003, "Elder maul", 1)));
+
+		service.shutdown();
+
+		assertEquals(2, captureMergedEvent().getContributingSignals().size());
+	}
+
+	@Test
+	public void chatLineChestAndTrackerAllFoldIntoOneEvent()
+	{
+		service.report(chatDrop("Elder maul", 1, 94_200_000));
+		service.report(coxChest("Chambers of Xeric", chestItem(21003, "Elder maul", 1)));
+		service.report(lootTrackerEvent("Chambers of Xeric", chestItem(21003, "Elder maul", 1)));
+
+		service.shutdown();
+
+		MergedDropEvent merged = captureMergedEvent();
+		assertEquals(3, merged.getContributingSignals().size());
+		assertEquals(DetectionMethod.RAID_CHEST_CONTAINER, merged.getPrimarySignal().getDetectionMethod());
+	}
+
+	/** Two chests pending at once still pair off one tracker event each. */
+	@Test
+	public void eachTrackerEventPairsWithOnlyOneChest()
+	{
+		service.report(coxChest("Chambers of Xeric", chestItem(560, "Death rune", 900)));
+		service.report(lootTrackerEvent("Chambers of Xeric", chestItem(560, "Death rune", 900)));
+		service.report(coxChest("Chambers of Xeric", chestItem(560, "Death rune", 900)));
+		service.report(lootTrackerEvent("Chambers of Xeric", chestItem(560, "Death rune", 900)));
+
+		service.shutdown();
+
+		ArgumentCaptor<MergedDropEvent> captor = ArgumentCaptor.forClass(MergedDropEvent.class);
+		verify(envelopeSink, times(2)).accept(captor.capture());
+		for (MergedDropEvent event : captor.getAllValues())
+		{
+			assertEquals(2, event.getContributingSignals().size());
+		}
+	}
+
+	/** A different raid's chest is not the same chest, even holding the same items. */
+	@Test
+	public void trackerEventForAnotherRaidDoesNotPair()
+	{
+		service.report(coxChest("Chambers of Xeric", chestItem(560, "Death rune", 900)));
+		service.report(lootTrackerEvent("Theatre of Blood", chestItem(560, "Death rune", 900)));
+
+		service.shutdown();
+
+		verify(envelopeSink, times(2)).accept(any());
+	}
+
+	/**
+	 * Chambers of Xeric announces the loot when Olm dies, long before the chest is opened. Held
+	 * open while the player is in the raid, the chat line is still there for the chest to claim,
+	 * and the chest brings the group back to the normal window without waiting for them to leave.
+	 */
+	@Test
+	public void heldChatLineWaitsForAChestOpenedMinutesLater()
+	{
+		long[] now = {0};
+		service.clock = () -> now[0];
+		Runnable sweep = startSweep();
+
+		service.holdNewGroups();
+		service.report(chatDrop("Elder maul", 1, 94_200_000));
+
+		now[0] = 5 * 60_000;
+		sweep.run();
+		verify(envelopeSink, never()).accept(any());
+
+		service.report(coxChest("Chambers of Xeric", chestItem(21003, "Elder maul", 1)));
+		service.report(lootTrackerEvent("Chambers of Xeric", chestItem(21003, "Elder maul", 1)));
+
+		sweep.run();
+		verify(envelopeSink, never()).accept(any());
+
+		now[0] += 5_000;
+		sweep.run();
+		assertEquals(3, captureMergedEvent().getContributingSignals().size());
+	}
+
+	/** Leaving without a chest to claim it still reports the line on its own. */
+	@Test
+	public void releasedChatLineGoesOutAfterTheNormalWindow()
+	{
+		long[] now = {0};
+		service.clock = () -> now[0];
+		Runnable sweep = startSweep();
+
+		service.holdNewGroups();
+		service.report(chatDrop("Elder maul", 1, 94_200_000));
+		now[0] = 10 * 60_000;
+		service.releaseHeldGroups();
+
+		now[0] += 5_000;
+		sweep.run();
+		assertEquals(1, captureMergedEvent().getContributingSignals().size());
+	}
+
+	/** Drops outside Chambers of Xeric keep the normal window. */
+	@Test
+	public void groupsOpenedAfterReleaseAreNotHeld()
+	{
+		long[] now = {0};
+		service.clock = () -> now[0];
+		Runnable sweep = startSweep();
+
+		service.holdNewGroups();
+		service.releaseHeldGroups();
+		service.report(chatDrop("Dragon boots", 1, 150_000));
+
+		now[0] = 5_000;
+		sweep.run();
+		verify(envelopeSink).accept(any());
+	}
+
+	/** A release that never comes can't trap loot forever. */
+	@Test
+	public void heldGroupStillClosesOnTheBackstop()
+	{
+		long[] now = {0};
+		service.clock = () -> now[0];
+		Runnable sweep = startSweep();
+
+		service.holdNewGroups();
+		service.report(chatDrop("Elder maul", 1, 94_200_000));
+
+		now[0] = 60 * 60_000 - 1;
+		sweep.run();
+		verify(envelopeSink, never()).accept(any());
+
+		now[0] = 60 * 60_000;
+		sweep.run();
+		verify(envelopeSink).accept(any());
+	}
+
+	/**
+	 * The raid's own monsters drop loot too. Those kills keep the normal window: the API stamps an
+	 * event when it's sent, so holding one would date it to the end of the raid.
+	 */
+	@Test
+	public void killsInsideTheRaidAreNotHeld()
+	{
+		long[] now = {0};
+		service.clock = () -> now[0];
+		Runnable sweep = startSweep();
+
+		service.holdNewGroups();
+		service.report(npcKill("Scavenger beast", 7548, killItem(20881, "Endarkened juice", 1)));
+		service.report(npcKill("Scavenger beast", 7548, killItem(20881, "Endarkened juice", 1)));
+
+		now[0] = 5_000;
+		sweep.run();
+		verify(envelopeSink, times(2)).accept(any());
+	}
+
+	/** A kill that claims a held chat line takes the group back to the normal window with it. */
+	@Test
+	public void killClaimingAHeldChatLineIsNotHeld()
+	{
+		long[] now = {0};
+		service.clock = () -> now[0];
+		Runnable sweep = startSweep();
+
+		service.holdNewGroups();
+		service.report(chatDrop("Dragon boots", 1, 150_000));
+		service.report(npcKill("Ogre", 117, killItem(11840, "Dragon boots", 1)));
+
+		now[0] = 5_000;
+		sweep.run();
+		assertEquals(2, captureMergedEvent().getContributingSignals().size());
 	}
 }
