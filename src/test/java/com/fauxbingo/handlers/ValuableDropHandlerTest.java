@@ -137,4 +137,47 @@ public class ValuableDropHandlerTest
 		org.junit.Assert.assertEquals("Chaos rune", signal.getItems().get(0).getName());
 		org.junit.Assert.assertEquals(1000, signal.getItems().get(0).getQuantity());
 	}
+
+	/** Splitting on the first " (" cut the (u) off, so the line never matched its kill. */
+	@Test
+	public void testValuableDropKeepsParenthesesInTheItemName()
+	{
+		ChatMessage event = new ChatMessage();
+		event.setType(ChatMessageType.GAMEMESSAGE);
+		event.setMessage("<col=ef1020>Valuable drop: Craw's bow (u) (14,400,000 coins)</col>");
+
+		valuableDropHandler.onChatMessage(event);
+
+		DropSignal signal = captureSignal();
+		org.junit.Assert.assertEquals("Craw's bow (u)", signal.getItems().get(0).getName());
+		org.junit.Assert.assertEquals(14_400_000L, signal.getTotalValueGe().longValue());
+	}
+
+	/** Only the final bracket is the value, whatever the name's own brackets hold. */
+	@Test
+	public void testValuableDropKeepsEveryBracketedSuffix()
+	{
+		String[][] cases = {
+			{"Valuable drop: Tumeken's shadow (uncharged) (1,234,567,890 coins)", "Tumeken's shadow (uncharged)"},
+			{"Valuable drop: Ring of wealth (5) (15,000 coins)", "Ring of wealth (5)"},
+			{"Valuable drop: 2 x Dragon pickaxe (or) (100,000 coins)", "Dragon pickaxe (or)"},
+		};
+
+		for (String[] c : cases)
+		{
+			ChatMessage event = new ChatMessage();
+			event.setType(ChatMessageType.GAMEMESSAGE);
+			event.setMessage(c[0]);
+			valuableDropHandler.onChatMessage(event);
+		}
+
+		ArgumentCaptor<DropSignal> captor = ArgumentCaptor.forClass(DropSignal.class);
+		verify(dropCorrelationService, times(cases.length)).report(captor.capture());
+		for (int i = 0; i < cases.length; i++)
+		{
+			org.junit.Assert.assertEquals(cases[i][1], captor.getAllValues().get(i).getItems().get(0).getName());
+		}
+		org.junit.Assert.assertEquals(1_234_567_890L, captor.getAllValues().get(0).getTotalValueGe().longValue());
+		org.junit.Assert.assertEquals(2, captor.getAllValues().get(2).getItems().get(0).getQuantity());
+	}
 }

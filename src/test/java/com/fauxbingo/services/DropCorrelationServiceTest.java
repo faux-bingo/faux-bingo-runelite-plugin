@@ -637,4 +637,16 @@ public class DropCorrelationServiceTest
 		sweep.run();
 		assertEquals(2, captureMergedEvent().getContributingSignals().size());
 	}
+
+	/** A revenant's Craw's bow (u) and its valuable-drop line, named the same way by both. */
+	@Test
+	public void chatLineForAnItemWithParenthesesJoinsItsKill()
+	{
+		service.report(npcKill("Revenant dark beast", 7938, killItem(22547, "Craw's bow (u)", 1)));
+		service.report(chatDrop("Craw's bow (u)", 1, 14_400_000));
+
+		service.shutdown();
+
+		assertEquals(2, captureMergedEvent().getContributingSignals().size());
+	}
 }

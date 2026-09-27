@@ -28,8 +28,12 @@ import net.runelite.client.eventbus.Subscribe;
 @RequiredArgsConstructor(onConstructor_ = @Inject)
 public class ValuableDropHandler
 {
+	/**
+	 * The name is captured apart from the trailing coin value because it can hold parentheses of
+	 * its own: "Craw's bow (u) (14,400,000 coins)" is still named "Craw's bow (u)".
+	 */
 	private static final Pattern VALUABLE_DROP_PATTERN = Pattern.compile(
-		".*Valuable drop: ([^<>]+?\\(((?:\\d+,?)+) coins\\))(?:</col>)?"
+		".*Valuable drop: ([^<>]+?) \\(((?:\\d+,?)+) coins\\)(?:</col>)?"
 	);
 
 	/** The chat line embeds quantity in the name, as in "30 x Dragon bones". */
@@ -53,7 +57,7 @@ public class ValuableDropHandler
 		if (matcher.matches())
 		{
 			long valuableDropValue = Long.parseLong(matcher.group(2).replaceAll(",", ""));
-			String valuableDropNameWithQuantity = matcher.group(1).split(" \\(")[0];
+			String valuableDropNameWithQuantity = matcher.group(1);
 			reportValuableDrop(chatMessage, valuableDropNameWithQuantity, valuableDropValue);
 		}
 	}
