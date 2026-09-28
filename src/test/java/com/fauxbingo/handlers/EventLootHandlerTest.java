@@ -86,7 +86,7 @@ public class EventLootHandlerTest
 		stubItem(TOME_OF_FIRE_ID, "Tome of fire", 4_000_000);
 	}
 
-	private void stubItem(int id, String name, int price)
+	private void stubItem(int id, String name, long price)
 	{
 		ItemComposition composition = mock(ItemComposition.class);
 		when(composition.getName()).thenReturn(name);

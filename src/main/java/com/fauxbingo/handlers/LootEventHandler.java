@@ -393,8 +393,8 @@ public class LootEventHandler
 		{
 			int itemId = itemStack.getId();
 			int quantity = itemStack.getQuantity();
-			int price = itemManager.getItemPrice(itemId);
-			totalValue += (long) price * quantity;
+			long price = itemManager.getItemPrice(itemId);
+			totalValue += price * quantity;
 
 			String itemName = itemManager.getItemComposition(itemId).getName();
 

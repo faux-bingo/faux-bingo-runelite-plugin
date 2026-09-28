@@ -81,7 +81,7 @@ public class LootEventHandlerTest
 
 		when(itemManager.getItemComposition(anyInt())).thenReturn(itemComposition);
 		when(itemComposition.getName()).thenReturn("Dragon bones");
-		when(itemManager.getItemPrice(anyInt())).thenReturn(2500);
+		when(itemManager.getItemPrice(anyInt())).thenReturn(2500L);
 	}
 
 	@Test
@@ -167,7 +167,7 @@ public class LootEventHandlerTest
 		when(itemManager.getItemComposition(101)).thenReturn(sharkComp2);
 		when(itemManager.getItemComposition(200)).thenReturn(teleComp);
 
-		when(itemManager.getItemPrice(anyInt())).thenReturn(1);
+		when(itemManager.getItemPrice(anyInt())).thenReturn(1L);
 
 		ItemStack shark1 = new ItemStack(100, 1, null);
 		ItemStack shark2 = new ItemStack(101, 2, null);
