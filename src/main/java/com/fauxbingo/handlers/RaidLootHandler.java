@@ -329,14 +329,14 @@ public class RaidLootHandler
 			{
 				String itemName = itemManager.getItemComposition(itemId).getName();
 				int quantity = item.getQuantity();
-				int price = itemManager.getItemPrice(itemId);
-				totalValue += (long) price * quantity;
+				long price = itemManager.getItemPrice(itemId);
+				totalValue += price * quantity;
 
 				allItems.add(DropItem.builder()
 					.id(itemId)
 					.name(itemName)
 					.quantity(quantity)
-					.unitPriceGe((long) price)
+					.unitPriceGe(price)
 					.build());
 			}
 		}

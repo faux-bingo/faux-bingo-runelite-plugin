@@ -32,7 +32,7 @@ import static org.mockito.Mockito.*;
 public class ServerNpcLootHandlerTest
 {
 	private static final int OATHPLATE_SHARDS_ID = 30765;
-	private static final int SHARD_PRICE = 183_000;
+	private static final long SHARD_PRICE = 183_000L;
 	private static final int BONES_ID = 526;
 	private static final int CHAOS_RUNE_ID = 562;
 
@@ -77,7 +77,7 @@ public class ServerNpcLootHandlerTest
 		ItemComposition bones = mock(ItemComposition.class);
 		when(bones.getName()).thenReturn("Bones");
 		when(itemManager.getItemComposition(BONES_ID)).thenReturn(bones);
-		when(itemManager.getItemPrice(BONES_ID)).thenReturn(100);
+		when(itemManager.getItemPrice(BONES_ID)).thenReturn(100L);
 
 		ItemComposition chaos = mock(ItemComposition.class);
 		when(chaos.getName()).thenReturn("Chaos rune");

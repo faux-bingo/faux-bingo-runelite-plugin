@@ -161,7 +161,7 @@ public class RaidLootHandlerTest
 		when(itemContainer.getItems()).thenReturn(new Item[]{new Item(1234, 100)});
 		when(itemManager.getItemComposition(1234)).thenReturn(itemComposition);
 		when(itemComposition.getName()).thenReturn("Pure essence");
-		when(itemManager.getItemPrice(1234)).thenReturn(2);
+		when(itemManager.getItemPrice(1234)).thenReturn(2L);
 
 		ItemContainerChanged containerEvent = new ItemContainerChanged(581, itemContainer);
 		raidLootHandler.onItemContainerChanged(containerEvent);
@@ -233,12 +233,12 @@ public class RaidLootHandlerTest
 		ItemComposition arrowComp = mock(ItemComposition.class);
 		when(arrowComp.getName()).thenReturn("Dragon arrow");
 		when(itemManager.getItemComposition(1)).thenReturn(arrowComp);
-		when(itemManager.getItemPrice(1)).thenReturn(2000);
+		when(itemManager.getItemPrice(1)).thenReturn(2000L);
 
 		ItemComposition scrollComp = mock(ItemComposition.class);
 		when(scrollComp.getName()).thenReturn("Dexterous prayer scroll");
 		when(itemManager.getItemComposition(2)).thenReturn(scrollComp);
-		when(itemManager.getItemPrice(2)).thenReturn(1200000);
+		when(itemManager.getItemPrice(2)).thenReturn(1200000L);
 
 		// KC Message to set context
 		ChatMessage kcEvent = new ChatMessage();
@@ -268,7 +268,7 @@ public class RaidLootHandlerTest
 		when(itemContainer.getItems()).thenReturn(new Item[]{new Item(1, 1)}); // Just some loot
 		when(itemManager.getItemComposition(1)).thenReturn(itemComposition);
 		when(itemComposition.getName()).thenReturn("Coins");
-		when(itemManager.getItemPrice(1)).thenReturn(1);
+		when(itemManager.getItemPrice(1)).thenReturn(1L);
 
 		ItemContainerChanged event = new ItemContainerChanged(801, itemContainer);
 		raidLootHandler.onItemContainerChanged(event);

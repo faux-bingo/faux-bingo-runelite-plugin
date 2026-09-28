@@ -42,7 +42,7 @@ import static org.mockito.Mockito.*;
 public class EventLootHandlerTest
 {
 	private static final int SOAKED_PAGE_ID = 25578;
-	private static final int SOAKED_PAGE_PRICE = 2815;
+	private static final long SOAKED_PAGE_PRICE = 2815L;
 	private static final String TEMPOROSS_EVENT = "Reward pool (Tempoross)";
 
 	private static final int RUBY_BRACELET_ID = 11085;
@@ -86,7 +86,7 @@ public class EventLootHandlerTest
 		stubItem(TOME_OF_FIRE_ID, "Tome of fire", 4_000_000);
 	}
 
-	private void stubItem(int id, String name, int price)
+	private void stubItem(int id, String name, long price)
 	{
 		ItemComposition composition = mock(ItemComposition.class);
 		when(composition.getName()).thenReturn(name);
