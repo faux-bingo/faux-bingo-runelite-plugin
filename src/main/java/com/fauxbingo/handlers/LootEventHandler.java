@@ -11,9 +11,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -21,6 +24,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.Item;
+import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.NPCComposition;
 import net.runelite.api.coords.WorldPoint;
@@ -180,11 +184,16 @@ public class LootEventHandler
 	 * An identical loot list is the normal pair. Failing that, one list holding nothing the other
 	 * lacks still pairs: the tile scan only sees what reached the ground, so a bonecrusher eating a
 	 * Mithril dragon's Dragon bones leaves it one item short of the server's list for the same kill.
-	 * Identical is tried first so a subset can't steal the pair of an exact match queued behind it.
+	 * Last, the lists may each hold something the other lacks, as long as every such item is one
+	 * the two events are known to disagree on (see isOneSidedItem). A Scurrius kill arrived as one
+	 * list without its Big bones and the other without its Scroll box (medium).
+	 * Each tier is tried in full before the next so a looser match can't steal the pair of a
+	 * tighter one queued behind it.
 	 */
 	private SeenKill findPair(String source, Map<Integer, Integer> totals, NpcLootSignal signal)
 	{
 		SeenKill subsetMatch = null;
+		SeenKill oneSidedMatch = null;
 		for (SeenKill seen : unpairedKills)
 		{
 			if (seen.signal != signal.other() || !Objects.equals(seen.source, source))
@@ -199,8 +208,59 @@ public class LootEventHandler
 			{
 				subsetMatch = seen;
 			}
+			if (oneSidedMatch == null && differsOnlyInOneSidedItems(seen.totals, totals))
+			{
+				oneSidedMatch = seen;
+			}
 		}
-		return subsetMatch;
+		return subsetMatch != null ? subsetMatch : oneSidedMatch;
+	}
+
+	/**
+	 * True when the lists share at least one item at the same count and every item whose count
+	 * differs is one-sided. Anything else differing, like Oathplate shards on one side and Chaos
+	 * runes on the other, still means two kills.
+	 */
+	private boolean differsOnlyInOneSidedItems(Map<Integer, Integer> a, Map<Integer, Integer> b)
+	{
+		Set<Integer> ids = new HashSet<>(a.keySet());
+		ids.addAll(b.keySet());
+
+		boolean shared = false;
+		for (int id : ids)
+		{
+			int countA = a.getOrDefault(id, 0);
+			int countB = b.getOrDefault(id, 0);
+			if (countA == countB)
+			{
+				shared = true;
+			}
+			else if (!isOneSidedItem(id))
+			{
+				return false;
+			}
+		}
+		return shared;
+	}
+
+	/**
+	 * Items one NPC loot event can list while the other leaves them out for the same kill. Bones and
+	 * ashes never reach the ground under a bonecrusher or ash sanctifier, so the tile scan misses
+	 * them. Clue scroll boxes and clue scrolls can show up in one list and be absent from the other.
+	 */
+	private boolean isOneSidedItem(int itemId)
+	{
+		ItemComposition composition = itemManager.getItemComposition(itemId);
+		String name = composition != null ? composition.getName() : null;
+		if (name == null)
+		{
+			return false;
+		}
+		name = name.toLowerCase(Locale.ROOT);
+		return name.endsWith("bones")
+			|| name.endsWith("ashes")
+			|| name.startsWith("scroll box (")
+			|| name.startsWith("clue scroll (");
 	}
 
 	/** True when every item in part appears in whole with at least the same count. */

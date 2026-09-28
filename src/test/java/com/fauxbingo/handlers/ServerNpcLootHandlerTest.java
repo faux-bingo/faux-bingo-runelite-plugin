@@ -35,6 +35,11 @@ public class ServerNpcLootHandlerTest
 	private static final long SHARD_PRICE = 183_000L;
 	private static final int BONES_ID = 526;
 	private static final int CHAOS_RUNE_ID = 562;
+	private static final int COINS_ID = 995;
+	private static final int BIG_BONES_ID = 532;
+	private static final int RAW_RAT_MEAT_ID = 2134;
+	private static final int SCURRIUS_SPINE_ID = 28798;
+	private static final int SCROLL_BOX_MEDIUM_ID = 24362;
 
 	@Mock
 	private ItemManager itemManager;
@@ -82,6 +87,19 @@ public class ServerNpcLootHandlerTest
 		ItemComposition chaos = mock(ItemComposition.class);
 		when(chaos.getName()).thenReturn("Chaos rune");
 		when(itemManager.getItemComposition(CHAOS_RUNE_ID)).thenReturn(chaos);
+
+		named(COINS_ID, "Coins");
+		named(BIG_BONES_ID, "Big bones");
+		named(RAW_RAT_MEAT_ID, "Raw rat meat");
+		named(SCURRIUS_SPINE_ID, "Scurrius' spine");
+		named(SCROLL_BOX_MEDIUM_ID, "Scroll box (medium)");
+	}
+
+	private void named(int itemId, String name)
+	{
+		ItemComposition composition = mock(ItemComposition.class);
+		when(composition.getName()).thenReturn(name);
+		when(itemManager.getItemComposition(itemId)).thenReturn(composition);
 	}
 
 	private ServerNpcLoot serverLoot(String name, List<ItemStack> items)
@@ -251,6 +269,49 @@ public class ServerNpcLootHandlerTest
 
 		lootEventHandler.onServerNpcLoot(serverLoot("Vorkath", Arrays.asList(bone, shard)));
 		lootEventHandler.onNpcLootReceived(tileLoot("Vorkath", Arrays.asList(bone, new ItemStack(CHAOS_RUNE_ID, 24, null))));
+
+		verify(dropCorrelationService, times(2)).report(any());
+	}
+
+	/**
+	 * The reported Scurrius double: one list had the Big bones but not the Scroll box (medium), the
+	 * other the reverse. Both differences are items the events are known to disagree on, so this is
+	 * one kill, whichever side each list came from.
+	 */
+	@Test
+	public void listsDifferingOnlyInBonesAndClueBoxPair()
+	{
+		List<ItemStack> withBones = Arrays.asList(
+			new ItemStack(COINS_ID, 5000, null),
+			new ItemStack(BIG_BONES_ID, 1, null),
+			new ItemStack(RAW_RAT_MEAT_ID, 5, null),
+			new ItemStack(SCURRIUS_SPINE_ID, 1, null));
+		List<ItemStack> withScrollBox = Arrays.asList(
+			new ItemStack(COINS_ID, 5000, null),
+			new ItemStack(RAW_RAT_MEAT_ID, 5, null),
+			new ItemStack(SCURRIUS_SPINE_ID, 1, null),
+			new ItemStack(SCROLL_BOX_MEDIUM_ID, 1, null));
+
+		lootEventHandler.onServerNpcLoot(serverLoot("Scurrius", withBones));
+		lootEventHandler.onNpcLootReceived(tileLoot("Scurrius", withScrollBox));
+		lootEventHandler.onNpcLootReceived(tileLoot("Scurrius", withBones));
+		lootEventHandler.onServerNpcLoot(serverLoot("Scurrius", withScrollBox));
+
+		verify(dropCorrelationService, times(2)).report(any());
+	}
+
+	/** A one-sided difference doesn't excuse a real one alongside it. */
+	@Test
+	public void oneSidedDifferenceAlongsideARealOneIsNotPaired()
+	{
+		lootEventHandler.onServerNpcLoot(serverLoot("Scurrius", Arrays.asList(
+			new ItemStack(COINS_ID, 5000, null),
+			new ItemStack(BIG_BONES_ID, 1, null),
+			new ItemStack(SCURRIUS_SPINE_ID, 1, null))));
+		lootEventHandler.onNpcLootReceived(tileLoot("Scurrius", Arrays.asList(
+			new ItemStack(COINS_ID, 5000, null),
+			new ItemStack(RAW_RAT_MEAT_ID, 5, null),
+			new ItemStack(SCROLL_BOX_MEDIUM_ID, 1, null))));
 
 		verify(dropCorrelationService, times(2)).report(any());
 	}
